@@ -1,6 +1,6 @@
 name: Champion data pack
 
-# 数据仓库专用：把代码仓库 checkout 到 src/，克隆上游 Showdown，跑两个生成脚本，
+# 数据仓库专用：拉取代码仓库（到 src/）+ 上游 Showdown，跑两个生成脚本，
 # 再把数据包作为【本仓库】的 Release asset 发布。
 # app 端填固定地址：https://github.com/scvrqh/ConnectionNationaldexMovesDamage/releases/latest/download/champion-pack.json
 #
@@ -23,13 +23,21 @@ jobs:
   publish:
     runs-on: windows-latest
     steps:
-      - name: Checkout generator code
-        uses: actions/checkout@v4
-        with:
-          repository: scvrqh/NationaldexMovesDamage
-          path: src
-          # 代码仓库若为 private，取消下一行注释，并在 Secrets 里配置 SOURCE_REPO_TOKEN（需 repo 读权限）
-          # token: ${{ secrets.SOURCE_REPO_TOKEN }}
+      # 不用 actions/checkout：它带的 GITHUB_TOKEN 只覆盖当前仓库，跨仓库会 404。
+      # public 代码仓库走匿名 clone；private 则需配置 SOURCE_REPO_TOKEN（PAT，Contents: Read）。
+      - name: Clone generator code
+        shell: pwsh
+        env:
+          SOURCE_TOKEN: ${{ secrets.SOURCE_REPO_TOKEN }}
+        run: |
+          if ($env:SOURCE_TOKEN) {
+            Write-Host 'using SOURCE_REPO_TOKEN'
+            git clone --depth 1 "https://x-access-token:$env:SOURCE_TOKEN@github.com/scvrqh/NationaldexMovesDamage.git" src
+          } else {
+            Write-Host 'no token, trying anonymous clone (repository must be public)'
+            git clone --depth 1 "https://github.com/scvrqh/NationaldexMovesDamage.git" src
+          }
+          if (-not (Test-Path 'src/tools/gen-champions-ps.mjs')) { throw 'generator checkout failed: src/tools/gen-champions-ps.mjs not found' }
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
