@@ -1,16 +1,16 @@
 name: Champion data pack
 
-# 发布侧：从上游 Pokemon Showdown 重新生成 champions 数据 -> 打成带 version 的 JSON
-# -> 作为 GitHub Release asset 发布，供 app 设置页的 Data pack URL 拉取。
+# 数据仓库专用：把代码仓库 checkout 到 src/，克隆上游 Showdown，跑两个生成脚本，
+# 再把数据包作为【本仓库】的 Release asset 发布。
+# app 端填固定地址：https://github.com/scvrqh/ConnectionNationaldexMovesDamage/releases/latest/download/champion-pack.json
 #
-# 作业必须跑在 windows-latest：tools/lib/load-ts.mjs 调用的是
-# @esbuild/win32-x64/esbuild.exe（硬编码平台二进制）。
+# 必须跑在 windows-latest：生成脚本调用 @esbuild/win32-x64/esbuild.exe（硬编码平台二进制）。
 
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: '数据包版本号（YYYYMMDD），留空则取上游 PS 的提交日期'
+        description: '数据包版本号 YYYYMMDD，留空取上游 PS 提交日期'
         required: false
         default: ''
   schedule:
@@ -23,31 +23,33 @@ jobs:
   publish:
     runs-on: windows-latest
     steps:
-      - name: Checkout this repository
+      - name: Checkout generator code
         uses: actions/checkout@v4
+        with:
+          repository: scvrqh/NationaldexMovesDamage
+          path: src
+          # 代码仓库若为 private，取消下一行注释，并在 Secrets 里配置 SOURCE_REPO_TOKEN（需 repo 读权限）
+          # token: ${{ secrets.SOURCE_REPO_TOKEN }}
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '22'
-          cache: npm
-          cache-dependency-path: tools/package-lock.json
 
       - name: Clone upstream Pokemon Showdown (shallow)
         shell: pwsh
         run: |
-          $dest = 'repo2/caches/pokemon-showdown'
-          if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
-          New-Item -ItemType Directory -Force -Path 'repo2/caches' | Out-Null
+          $dest = 'src/repo2/caches/pokemon-showdown'
+          New-Item -ItemType Directory -Force -Path 'src/repo2/caches' | Out-Null
           git clone --depth 1 https://github.com/smogon/pokemon-showdown.git $dest
           if (-not (Test-Path "$dest/data/mods/champions")) { throw 'upstream checkout has no data/mods/champions' }
 
-      - name: Install tools dependencies
-        working-directory: tools
+      - name: Install generator dependencies
+        working-directory: src/tools
         run: npm ci
 
       - name: Regenerate champions data from upstream
-        run: node tools/gen-champions-ps.mjs
+        run: node src/tools/gen-champions-ps.mjs
 
       - name: Build versioned data pack
         shell: pwsh
@@ -56,7 +58,7 @@ jobs:
           if (-not (Test-Path $src)) { throw "gen-champions-ps.mjs did not produce $src" }
           New-Item -ItemType Directory -Force -Path 'dist' | Out-Null
           $pack = Join-Path $PWD 'dist/champion-pack.json'
-          $cliArgs = @('tools/gen-champion-pack.mjs', "--src=$src", "--out=$pack")
+          $cliArgs = @('src/tools/gen-champion-pack.mjs', "--src=$src", "--out=$pack")
           if ('${{ inputs.version }}' -ne '') { $cliArgs += "--version=${{ inputs.version }}" }
           node @cliArgs
 
@@ -75,13 +77,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release view '${{ steps.ver.outputs.tag }}' --repo '${{ github.repository }}'
-          if ($LASTEXITCODE -eq 0) {
-            "skip=true" >> $env:GITHUB_OUTPUT
-            Write-Host "release ${{ steps.ver.outputs.tag }} already exists, skip publishing"
-          } else {
-            "skip=false" >> $env:GITHUB_OUTPUT
-            Write-Host "no release for ${{ steps.ver.outputs.tag }} yet, will publish"
-          }
+          if ($LASTEXITCODE -eq 0) { "skip=true" >> $env:GITHUB_OUTPUT }
+          else { "skip=false" >> $env:GITHUB_OUTPUT }
 
       - name: Publish release asset
         if: steps.check.outputs.skip == 'false'
@@ -94,4 +91,4 @@ jobs:
           body: |
             Champions 数据包，version ${{ steps.ver.outputs.version }}。
 
-            直链：https://github.com/${{ github.repository }}/releases/download/${{ steps.ver.outputs.tag }}/champion-pack.json
+            固定直链：https://github.com/${{ github.repository }}/releases/latest/download/champion-pack.json
