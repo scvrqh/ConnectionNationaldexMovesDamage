@@ -71,9 +71,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release view '${{ steps.ver.outputs.tag }}' --repo '${{ github.repository }}'
+          gh release view '${{ steps.ver.outputs.tag }}' --repo '${{ github.repository }}' 2>$null
           if ($LASTEXITCODE -eq 0) { "skip=true" >> $env:GITHUB_OUTPUT }
           else { "skip=false" >> $env:GITHUB_OUTPUT }
+          # gh 在 release 不存在时返回 1，pwsh 步骤会继承这个退出码并判失败；
+          # 这里显式收尾，让「查不到 = 该发布」成为正常分支。
+          exit 0
 
       - name: Publish release asset
         if: steps.check.outputs.skip == 'false'
