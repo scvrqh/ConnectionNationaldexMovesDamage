@@ -1,0 +1,97 @@
+name: Champion data pack
+
+# 发布侧：从上游 Pokemon Showdown 重新生成 champions 数据 -> 打成带 version 的 JSON
+# -> 作为 GitHub Release asset 发布，供 app 设置页的 Data pack URL 拉取。
+#
+# 作业必须跑在 windows-latest：tools/lib/load-ts.mjs 调用的是
+# @esbuild/win32-x64/esbuild.exe（硬编码平台二进制）。
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '数据包版本号（YYYYMMDD），留空则取上游 PS 的提交日期'
+        required: false
+        default: ''
+  schedule:
+    - cron: '0 3 * * 1'
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout this repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: tools/package-lock.json
+
+      - name: Clone upstream Pokemon Showdown (shallow)
+        shell: pwsh
+        run: |
+          $dest = 'repo2/caches/pokemon-showdown'
+          if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
+          New-Item -ItemType Directory -Force -Path 'repo2/caches' | Out-Null
+          git clone --depth 1 https://github.com/smogon/pokemon-showdown.git $dest
+          if (-not (Test-Path "$dest/data/mods/champions")) { throw 'upstream checkout has no data/mods/champions' }
+
+      - name: Install tools dependencies
+        working-directory: tools
+        run: npm ci
+
+      - name: Regenerate champions data from upstream
+        run: node tools/gen-champions-ps.mjs
+
+      - name: Build versioned data pack
+        shell: pwsh
+        run: |
+          $src = Join-Path $env:TMP 'champions-ps.json'
+          if (-not (Test-Path $src)) { throw "gen-champions-ps.mjs did not produce $src" }
+          New-Item -ItemType Directory -Force -Path 'dist' | Out-Null
+          $pack = Join-Path $PWD 'dist/champion-pack.json'
+          $cliArgs = @('tools/gen-champion-pack.mjs', "--src=$src", "--out=$pack")
+          if ('${{ inputs.version }}' -ne '') { $cliArgs += "--version=${{ inputs.version }}" }
+          node @cliArgs
+
+      - name: Resolve version and tag
+        id: ver
+        shell: pwsh
+        run: |
+          $version = (Get-Content -Raw -Path 'dist/champion-pack.json' | ConvertFrom-Json).version
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "tag=champion-data-$version" >> $env:GITHUB_OUTPUT
+
+      - name: Skip when this version is already published
+        id: check
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view '${{ steps.ver.outputs.tag }}' --repo '${{ github.repository }}'
+          if ($LASTEXITCODE -eq 0) {
+            "skip=true" >> $env:GITHUB_OUTPUT
+            Write-Host "release ${{ steps.ver.outputs.tag }} already exists, skip publishing"
+          } else {
+            "skip=false" >> $env:GITHUB_OUTPUT
+            Write-Host "no release for ${{ steps.ver.outputs.tag }} yet, will publish"
+          }
+
+      - name: Publish release asset
+        if: steps.check.outputs.skip == 'false'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: ${{ steps.ver.outputs.tag }}
+          files: dist/champion-pack.json
+          fail_on_unmatched_files: true
+          body: |
+            Champions 数据包，version ${{ steps.ver.outputs.version }}。
+
+            直链：https://github.com/${{ github.repository }}/releases/download/${{ steps.ver.outputs.tag }}/champion-pack.json
