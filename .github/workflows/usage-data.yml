@@ -113,6 +113,23 @@ jobs:
         run: |
           node tools/gen-usage-index.mjs --repo '${{ github.repository }}' --month '${{ steps.m.outputs.month }}' --months '${{ steps.months.outputs.list }}' --out dist/usage-index.json
 
+      - name: Attach latest champion pack
+        if: steps.check.outputs.skip == 'false' && steps.source.outputs.skip == 'false'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # releases/latest 只指向最近创建的那个 release：两类数据各有自己的 release，
+          # 所以每次发布都把另一类的最新文件一并挂上，latest/download/ 下两份就一直在。
+          $repo = '${{ github.repository }}'
+          $list = gh release list --repo $repo --limit 200 --json tagName,createdAt | ConvertFrom-Json
+          $src = @($list | Where-Object { $_.tagName -like 'champion-data-*' } | Sort-Object createdAt -Descending)[0]
+          if ($null -eq $src) {
+            Write-Host '::warning::还没有 champion-data-* 发布，本次不附带冠军数据包'
+          } else {
+            Write-Host "附上 冠军数据包：$($src.tagName)"
+            gh release download $src.tagName --repo $repo --pattern champion-pack.json --dir dist --clobber
+          }
       - name: Publish release asset
         if: steps.check.outputs.skip == 'false' && steps.source.outputs.skip == 'false'
         uses: softprops/action-gh-release@v2
@@ -122,10 +139,24 @@ jobs:
           files: |
             dist/usage-gen9-${{ steps.m.outputs.month }}.json.gz
             dist/usage-index.json
-          fail_on_unmatched_files: true
+            dist/champion-pack.json
+          fail_on_unmatched_files: false
           body: |
             ${{ steps.m.outputs.month }} 的使用率数据包（smogon chaos 裁剪，约 2 MB）。
 
             索引（永远指向最新一次发布）：https://github.com/${{ github.repository }}/releases/latest/download/usage-index.json
             当月数据：https://github.com/${{ github.repository }}/releases/download/${{ steps.m.outputs.tag }}/usage-gen9-${{ steps.m.outputs.month }}.json.gz
 
+      - name: Verify releases/latest carries both packs
+        if: steps.check.outputs.skip == 'false'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $repo = '${{ github.repository }}'
+          $tag = gh release view --repo $repo --json tagName -q .tagName
+          $names = (gh release view $tag --repo $repo --json assets --jq '.assets[].name') -split '\r?\n'
+          foreach ($f in @('champion-pack.json', 'usage-index.json')) {
+            if ($names -notcontains $f) { Write-Host "::error::最新 release $tag 缺少 $f"; exit 1 }
+          }
+          Write-Host "latest ($tag) 同时带 champion-pack.json 与 usage-index.json"

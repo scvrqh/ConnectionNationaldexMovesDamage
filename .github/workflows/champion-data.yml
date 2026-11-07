@@ -78,15 +78,48 @@ jobs:
           # 这里显式收尾，让「查不到 = 该发布」成为正常分支。
           exit 0
 
+      - name: Attach latest usage index
+        if: steps.check.outputs.skip == 'false'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # releases/latest 只指向最近创建的那个 release：两类数据各有自己的 release，
+          # 所以每次发布都把另一类的最新文件一并挂上，latest/download/ 下两份就一直在。
+          $repo = '${{ github.repository }}'
+          $list = gh release list --repo $repo --limit 200 --json tagName,createdAt | ConvertFrom-Json
+          $src = @($list | Where-Object { $_.tagName -like 'usage-data-*' } | Sort-Object createdAt -Descending)[0]
+          if ($null -eq $src) {
+            Write-Host '::warning::还没有 usage-data-* 发布，本次不附带使用率索引'
+          } else {
+            Write-Host "附上 使用率索引：$($src.tagName)"
+            gh release download $src.tagName --repo $repo --pattern usage-index.json --dir dist --clobber
+          }
       - name: Publish release asset
         if: steps.check.outputs.skip == 'false'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.ver.outputs.tag }}
           name: ${{ steps.ver.outputs.tag }}
-          files: dist/champion-pack.json
-          fail_on_unmatched_files: true
+          files: |
+            dist/champion-pack.json
+            dist/usage-index.json
+          fail_on_unmatched_files: false
           body: |
             Champions 数据包，version ${{ steps.ver.outputs.version }}。
 
             固定直链：https://github.com/${{ github.repository }}/releases/latest/download/champion-pack.json
+
+      - name: Verify releases/latest carries both packs
+        if: steps.check.outputs.skip == 'false'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $repo = '${{ github.repository }}'
+          $tag = gh release view --repo $repo --json tagName -q .tagName
+          $names = (gh release view $tag --repo $repo --json assets --jq '.assets[].name') -split '\r?\n'
+          foreach ($f in @('champion-pack.json', 'usage-index.json')) {
+            if ($names -notcontains $f) { Write-Host "::error::最新 release $tag 缺少 $f"; exit 1 }
+          }
+          Write-Host "latest ($tag) 同时带 champion-pack.json 与 usage-index.json"
