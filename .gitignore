@@ -1,3 +1,4 @@
-﻿node_modules/
+.dsh-diag/
+node_modules/
 dist/
 repo2/
