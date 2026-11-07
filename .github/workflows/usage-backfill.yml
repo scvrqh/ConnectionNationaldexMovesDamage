@@ -1,0 +1,166 @@
+name: Usage data backfill
+
+# 一次性补齐历史月份：按月份矩阵并行，每月一个 job，各自下载 chaos、裁剪、发布一个
+# usage-data-<月> 的 Release；全部跑完后再由一个 job 汇总所有已发布月份重建索引，
+# 覆盖到当时最新的那个 Release 上（`releases/latest/download/usage-index.json` 才能取到）。
+#
+# 已经发布过的月份会在 job 里被跳过，所以可以反复跑、也可以分批跑。
+on:
+  workflow_dispatch:
+    inputs:
+      from:
+        description: '起始月份 YYYY-MM'
+        required: true
+        default: '2023-01'
+      to:
+        description: '结束月份 YYYY-MM（含）'
+        required: true
+        default: '2026-09'
+
+permissions:
+  contents: write
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      months: ${{ steps.list.outputs.months }}
+    steps:
+      - name: List months
+        id: list
+        shell: pwsh
+        run: |
+          $from = [datetime]::ParseExact('${{ inputs.from }}', 'yyyy-MM', $null)
+          $to = [datetime]::ParseExact('${{ inputs.to }}', 'yyyy-MM', $null)
+          if ($to -lt $from) { throw "结束月份 $to 早于起始月份 $from" }
+          $list = @()
+          for ($d = $from; $d -le $to; $d = $d.AddMonths(1)) { $list += $d.ToString('yyyy-MM') }
+          Write-Host "共 $($list.Count) 个月：$($list[0]) .. $($list[-1])"
+          # 不用 ConvertTo-Json：单元素数组会被降级成字符串，-AsArray 又要 PowerShell 7
+          $json = '["' + ($list -join '","') + '"]'
+          "months=$json" >> $env:GITHUB_OUTPUT
+
+  backfill:
+    needs: plan
+    name: backfill ${{ matrix.month }}
+    runs-on: windows-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      # smogon 是公益站点，别一次把 40 多个月的 worker 全放出去（每个 job 内部已有 20 并发）
+      max-parallel: 4
+      matrix:
+        month: ${{ fromJSON(needs.plan.outputs.months) }}
+    steps:
+      - name: Checkout this repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Skip when this month is already published
+        id: check
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view 'usage-data-${{ matrix.month }}' --repo '${{ github.repository }}' 2>$null
+          if ($LASTEXITCODE -eq 0) { "skip=true" >> $env:GITHUB_OUTPUT }
+          else { "skip=false" >> $env:GITHUB_OUTPUT }
+          exit 0
+
+      - name: Skip when smogon has no data for this month
+        id: source
+        if: steps.check.outputs.skip == 'false'
+        shell: pwsh
+        env:
+          MONTH: ${{ matrix.month }}
+        run: |
+          $url = "https://www.smogon.com/stats/$env:MONTH/"
+          try {
+            $r = Invoke-WebRequest -Uri $url -Method Head -UseBasicParsing -TimeoutSec 30
+            $ok = $r.StatusCode -eq 200
+          } catch { $ok = $false }
+          if (-not $ok) {
+            Write-Host "::warning::smogon 没有 $env:MONTH 的数据（$url）"
+            "skip=true" >> $env:GITHUB_OUTPUT
+          } else {
+            "skip=false" >> $env:GITHUB_OUTPUT
+          }
+
+      - name: Download chaos data from smogon
+        if: steps.check.outputs.skip == 'false' && steps.source.outputs.skip == 'false'
+        shell: pwsh
+        env:
+          USAGE_MONTH: ${{ matrix.month }}
+        run: node tools/gen-usage-raw.mjs
+
+      - name: Build data pack
+        if: steps.check.outputs.skip == 'false' && steps.source.outputs.skip == 'false'
+        shell: pwsh
+        env:
+          USAGE_MONTH: ${{ matrix.month }}
+          USAGE_OUT: dist/usage-gen9-${{ matrix.month }}.json.gz
+        run: node tools/gen-usage-stats.mjs
+
+      - name: Build index for this month
+        if: steps.check.outputs.skip == 'false' && steps.source.outputs.skip == 'false'
+        shell: pwsh
+        run: node tools/gen-usage-index.mjs --repo '${{ github.repository }}' --month '${{ matrix.month }}' --out dist/usage-index.json
+
+      - name: Publish release asset
+        if: steps.check.outputs.skip == 'false' && steps.source.outputs.skip == 'false'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: usage-data-${{ matrix.month }}
+          name: usage-data-${{ matrix.month }}
+          files: |
+            dist/usage-gen9-${{ matrix.month }}.json.gz
+            dist/usage-index.json
+          fail_on_unmatched_files: true
+          body: |
+            ${{ matrix.month }} 的使用率数据包（smogon chaos 裁剪，历史月份补录）。
+
+  index:
+    needs: backfill
+    if: always()
+    runs-on: windows-latest
+    steps:
+      - name: Checkout this repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Collect already published months
+        id: months
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $list = gh release list --repo '${{ github.repository }}' --limit 500 --json tagName | ConvertFrom-Json
+          $months = @($list | ForEach-Object { $_.tagName } |
+            Where-Object { $_ -like 'usage-data-*' } |
+            ForEach-Object { $_.Substring(11) } |
+            Sort-Object -Unique -Descending)
+          Write-Host "已发布 $($months.Count) 个月：$($months -join ', ')"
+          "list=$($months -join ',')" >> $env:GITHUB_OUTPUT
+
+      - name: Build full index
+        shell: pwsh
+        run: node tools/gen-usage-index.mjs --repo '${{ github.repository }}' --months '${{ steps.months.outputs.list }}' --out dist/usage-index.json
+
+      - name: Upload index to the latest release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = gh release view --repo '${{ github.repository }}' --json tagName -q .tagName
+          Write-Host "写到最新 release：$tag"
+          gh release upload $tag dist/usage-index.json --repo '${{ github.repository }}' --clobber
+          Write-Host "https://github.com/${{ github.repository }}/releases/latest/download/usage-index.json"
+

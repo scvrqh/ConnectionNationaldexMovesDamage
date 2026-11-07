@@ -20,6 +20,16 @@ Actions 自动跑：冠军数据每周一 03:00 UTC，使用率数据每月 5 �
 - 同一个月已经发布过会被跳过（不覆盖）；smogon 还没放出该月数据时只打一条 warning，不算失败。
 - 抓取约 470 MB、耗时一小时上下，workflow 的 `timeout-minutes` 放到 180。
 
+## 补历史月份
+
+`.github/workflows/usage-backfill.yml` 用来一次性补齐旧月份（smogon 的月度存档从 2023-01 起都有）：
+
+- Actions → Usage data backfill → Run workflow，填 `from` / `to`（含端点），默认 `2023-01` 到 `2026-09`。
+- 按月份拆成矩阵并行，`max-parallel: 4`——smogon 是公益站点，别一次把几十个月的 worker 全放出去。
+- 每个月一个 job：抓 chaos → 裁剪 → 发布 `usage-data-<月>`。已发布过的月份自动跳过，所以可以分批跑、中断后直接重跑。
+- 全部结束后另一个 job 汇总已发布月份重建索引，覆盖写到**当时最新**的那个 Release 上（`releases/latest/download/usage-index.json` 靠它取）。
+- 单个月份约 1–2 分钟，45 个月跑完大约 20–30 分钟。
+
 ## 这里的文件都是从代码仓库复制来的
 
 自包含的代价是「同一套脚本存在两份」，**改动生成逻辑时必须同步**。副本清单：
