@@ -1,0 +1,131 @@
+name: Usage data pack
+
+# 自包含：生成脚本的副本放在本仓库 tools/ 里（gen-usage-raw.mjs / gen-usage-stats.mjs / gen-usage-index.mjs），
+# 不读代码仓库。作业每月从 smogon 抓 chaos 原始数据（47 个格式 × 各档位，约 470 MB），
+# 裁成 2 MB 左右的数据包，发布成 tag 为 usage-data-<月> 的 Release：
+#   asset = usage-gen9-<月>.json.gz + usage-index.json
+#
+# app 端固定地址：
+#   https://github.com/scvrqh/ConnectionNationaldexMovesDamage/releases/latest/download/usage-index.json
+# 索引里每个月份写的是**它自己那次 release** 的绝对地址，所以旧月份不依赖 latest。
+
+on:
+  workflow_dispatch:
+    inputs:
+      month:
+        description: '统计月份 YYYY-MM（smogon 的目录名），留空取上个月'
+        required: false
+        default: ''
+  schedule:
+    - cron: '0 6 5 * *'   # 每月 5 日 06:00 UTC：smogon 通常月初几天内放出上月数据
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: windows-latest
+    timeout-minutes: 180
+    steps:
+      - name: Checkout this repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Resolve month and tag
+        id: m
+        shell: pwsh
+        run: |
+          $month = '${{ inputs.month }}'
+          if ([string]::IsNullOrWhiteSpace($month)) {
+            $month = (Get-Date).AddMonths(-1).ToString('yyyy-MM')
+          }
+          if ($month -notmatch '^\d{4}-\d{2}$') { throw "月份格式应为 YYYY-MM，收到 $month" }
+          "month=$month" >> $env:GITHUB_OUTPUT
+          "tag=usage-data-$month" >> $env:GITHUB_OUTPUT
+
+      - name: Skip when this month is already published
+        id: check
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view '${{ steps.m.outputs.tag }}' --repo '${{ github.repository }}' 2>$null
+          if ($LASTEXITCODE -eq 0) { "skip=true" >> $env:GITHUB_OUTPUT }
+          else { "skip=false" >> $env:GITHUB_OUTPUT }
+          # gh 在 release 不存在时返回 1，pwsh 会把它当成步骤失败；这里显式收尾
+          exit 0
+
+      - name: Skip when smogon has no data for this month yet
+        id: source
+        if: steps.check.outputs.skip == 'false'
+        shell: pwsh
+        env:
+          MONTH: ${{ steps.m.outputs.month }}
+        run: |
+          $url = "https://www.smogon.com/stats/$env:MONTH/"
+          try {
+            $r = Invoke-WebRequest -Uri $url -Method Head -UseBasicParsing -TimeoutSec 30
+            $ok = $r.StatusCode -eq 200
+          } catch { $ok = $false }
+          if (-not $ok) {
+            Write-Host "::warning::smogon 还没有 $env:MONTH 的数据（$url），跳过本次发布"
+            "skip=true" >> $env:GITHUB_OUTPUT
+          } else {
+            "skip=false" >> $env:GITHUB_OUTPUT
+          }
+
+      - name: Download chaos data from smogon
+        if: steps.check.outputs.skip == 'false' && steps.source.outputs.skip == 'false'
+        shell: pwsh
+        env:
+          USAGE_MONTH: ${{ steps.m.outputs.month }}
+        run: node tools/gen-usage-raw.mjs
+
+      - name: Build data pack
+        if: steps.check.outputs.skip == 'false' && steps.source.outputs.skip == 'false'
+        shell: pwsh
+        env:
+          USAGE_MONTH: ${{ steps.m.outputs.month }}
+          USAGE_OUT: dist/usage-gen9-${{ steps.m.outputs.month }}.json.gz
+        run: node tools/gen-usage-stats.mjs
+
+      - name: Collect already published months
+        id: months
+        if: steps.check.outputs.skip == 'false' && steps.source.outputs.skip == 'false'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $list = gh release list --repo '${{ github.repository }}' --limit 200 --json tagName | ConvertFrom-Json
+          $months = @($list | ForEach-Object { $_.tagName } |
+            Where-Object { $_ -like 'usage-data-*' } |
+            ForEach-Object { $_.Substring(11) } |
+            Sort-Object -Unique)
+          "list=$($months -join ',')" >> $env:GITHUB_OUTPUT
+
+      - name: Build usage index
+        if: steps.check.outputs.skip == 'false' && steps.source.outputs.skip == 'false'
+        shell: pwsh
+        run: |
+          node tools/gen-usage-index.mjs --repo '${{ github.repository }}' --month '${{ steps.m.outputs.month }}' --months '${{ steps.months.outputs.list }}' --out dist/usage-index.json
+
+      - name: Publish release asset
+        if: steps.check.outputs.skip == 'false' && steps.source.outputs.skip == 'false'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.m.outputs.tag }}
+          name: ${{ steps.m.outputs.tag }}
+          files: |
+            dist/usage-gen9-${{ steps.m.outputs.month }}.json.gz
+            dist/usage-index.json
+          fail_on_unmatched_files: true
+          body: |
+            ${{ steps.m.outputs.month }} 的使用率数据包（smogon chaos 裁剪，约 2 MB）。
+
+            索引（永远指向最新一次发布）：https://github.com/${{ github.repository }}/releases/latest/download/usage-index.json
+            当月数据：https://github.com/${{ github.repository }}/releases/download/${{ steps.m.outputs.tag }}/usage-gen9-${{ steps.m.outputs.month }}.json.gz
+
