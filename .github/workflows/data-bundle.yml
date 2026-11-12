@@ -1,0 +1,125 @@
+name: Data bundle
+
+# 汇总包：一次导入即可拿到冠军数据 + 全部使用率月份，pack 结构由 app 侧固定契约决定：
+#   manifest.json + champion-pack.json + usage/<YYYY-MM>.json.gz
+# 输入是既有两类发布的产物（champion-data-* 的 champion-pack.json、usage-data-* 的 usage-index.json），
+# 都从 Release 取回后再打包 —— 本作业不重新生成任何数据。
+#
+# 发布时必须同时挂上 champion-pack.json 与 usage-index.json：releases/latest 只指向最近创建的
+# 那个 release，app 里写死的两个老地址不能因为这次发布而 404。
+
+on:
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: '只打最新 n 个月（留空表示全部月份）'
+        required: false
+        default: ''
+  schedule:
+    - cron: '30 3 * * 1'   # 每周一 03:30 UTC，晚于冠军数据 03:00 的发布
+
+permissions:
+  contents: write
+
+jobs:
+  bundle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout this repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Fetch the latest champion pack and usage index
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          repo="${{ github.repository }}"
+          mkdir -p dist
+          champion_tag=$(gh release list --repo "$repo" --limit 200 --json tagName,createdAt \
+            --jq '[.[] | select(.tagName | startswith("champion-data-"))] | sort_by(.createdAt) | reverse | .[0].tagName')
+          if [ -z "$champion_tag" ] || [ "$champion_tag" = "null" ]; then
+            echo "::error::还没有 champion-data-* 发布，无法组装汇总包"; exit 1
+          fi
+          usage_tag=$(gh release list --repo "$repo" --limit 200 --json tagName,createdAt \
+            --jq '[.[] | select(.tagName | startswith("usage-data-"))] | sort_by(.createdAt) | reverse | .[0].tagName')
+          if [ -z "$usage_tag" ] || [ "$usage_tag" = "null" ]; then
+            echo "::error::还没有 usage-data-* 发布，无法组装汇总包"; exit 1
+          fi
+          echo "冠军数据：$champion_tag"
+          echo "使用率索引：$usage_tag"
+          gh release download "$champion_tag" --repo "$repo" --pattern champion-pack.json --dir dist --clobber
+          gh release download "$usage_tag" --repo "$repo" --pattern usage-index.json --dir dist --clobber
+          ls -l dist
+
+      - name: Build the bundle
+        env:
+          LIMIT: ${{ inputs.limit }}
+        run: |
+          set -euo pipefail
+          if [ -n "${LIMIT:-}" ]; then
+            node tools/build-bundle.mjs --limit "$LIMIT"
+          else
+            node tools/build-bundle.mjs
+          fi
+
+      - name: Zip the bundle
+        run: |
+          set -euo pipefail
+          # 显式列出条目：manifest.json 必须在 zip 根目录，别让 zip 写成 ./manifest.json
+          ( cd dist/bundle && zip -r ../data-bundle.zip manifest.json champion-pack.json usage )
+          unzip -l dist/data-bundle.zip | head -n 12
+
+      - name: Snapshot formats-data.js
+        run: |
+          set -euo pipefail
+          curl -fsSL -o dist/tiers-formats-data.js https://play.pokemonshowdown.com/data/formats-data.js
+          head -c 80 dist/tiers-formats-data.js; echo
+
+      - name: Resolve release tag
+        id: tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          base="data-bundle-$(date -u +%Y%m%d)"
+          tag="$base"
+          n=2
+          # 同一天重复手动触发时加后缀，不覆盖已有 release
+          while gh release view "$tag" --repo "${{ github.repository }}" >/dev/null 2>&1; do
+            tag="${base}-${n}"
+            n=$((n + 1))
+          done
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Publish release with four assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          repo="${{ github.repository }}"
+          tag="${{ steps.tag.outputs.tag }}"
+          gh release create "$tag" --repo "$repo" --title "$tag" \
+            --notes "$(printf '汇总数据包：冠军数据 + 全部已发布的使用率月份，一次导入即可。\n\n直链：https://github.com/%s/releases/latest/download/data-bundle.zip\n' "$repo")" \
+            dist/data-bundle.zip \
+            dist/tiers-formats-data.js \
+            dist/champion-pack.json \
+            dist/usage-index.json
+
+      - name: Verify releases/latest carries all four assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          repo="${{ github.repository }}"
+          tag=$(gh release view --repo "$repo" --json tagName --jq .tagName)
+          names=$(gh release view "$tag" --repo "$repo" --json assets --jq '.assets[].name')
+          for f in data-bundle.zip tiers-formats-data.js champion-pack.json usage-index.json; do
+            echo "$names" | grep -qx "$f" || { echo "::error::最新 release $tag 缺少 $f"; exit 1; }
+          done
+          echo "latest ($tag) 同时带 data-bundle.zip / tiers-formats-data.js / champion-pack.json / usage-index.json"
