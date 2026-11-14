@@ -1,0 +1,119 @@
+name: Usage data repack
+
+# 把已经发布出去的旧 gzip JSON 资产换成 PKMB 二进制包（app 端只认二进制）：
+# 直接从各月份自己的 release 取回原包，本地转码后再 --clobber 上传，最后重建索引挂到最新 release。
+# 已发布过的月份不会被跳过——重复跑是幂等的（第二次已经没有 gzip 包可下，会直接放过）。
+on:
+  workflow_dispatch:
+    inputs:
+      from:
+        description: '起始月份 YYYY-MM'
+        required: true
+        default: '2023-01'
+      to:
+        description: '结束月份 YYYY-MM（含）'
+        required: true
+        default: '2026-10'
+
+permissions:
+  contents: write
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      months: ${{ steps.list.outputs.months }}
+    steps:
+      - name: List months
+        id: list
+        shell: pwsh
+        run: |
+          $from = [datetime]::ParseExact('${{ inputs.from }}', 'yyyy-MM', $null)
+          $to = [datetime]::ParseExact('${{ inputs.to }}', 'yyyy-MM', $null)
+          if ($to -lt $from) { throw "结束月份 $to 早于起始月份 $from" }
+          $list = @()
+          for ($d = $from; $d -le $to; $d = $d.AddMonths(1)) { $list += $d.ToString('yyyy-MM') }
+          $json = '["' + ($list -join '","') + '"]'
+          "months=$json" >> $env:GITHUB_OUTPUT
+  repack:
+    needs: plan
+    name: repack ${{ matrix.month }}
+    runs-on: windows-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        month: ${{ fromJSON(needs.plan.outputs.months) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Skip when this month was never published
+        id: check
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view 'usage-data-${{ matrix.month }}' --repo '${{ github.repository }}' 2>$null
+          if ($LASTEXITCODE -eq 0) { "skip=false" >> $env:GITHUB_OUTPUT } else { "skip=true" >> $env:GITHUB_OUTPUT }
+          exit 0
+      - name: Download the published pack
+        if: steps.check.outputs.skip == 'false'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          New-Item -ItemType Directory -Force tmp | Out-Null
+          gh release download 'usage-data-${{ matrix.month }}' --repo '${{ github.repository }}' --pattern 'usage-gen9-*.json.gz' --dir tmp --clobber
+      - name: Convert to a binary pack
+        if: steps.check.outputs.skip == 'false'
+        shell: pwsh
+        run: |
+          $src = Get-ChildItem tmp -Filter *.json.gz | Select-Object -First 1
+          if ($null -eq $src) { Write-Host "::warning::这个 release 里已经没有 gzip 包"; exit 0 }
+          node --max-old-space-size=2048 tools/gen-usage-pack.mjs $src.FullName "dist/usage-gen9-${{ matrix.month }}.pack" --verify
+      - name: Replace the asset
+        if: steps.check.outputs.skip == 'false'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = 'usage-data-${{ matrix.month }}'
+          $pack = "dist/usage-gen9-${{ matrix.month }}.pack"
+          if (-not (Test-Path $pack)) { Write-Host "::warning::没有产出 $pack"; exit 0 }
+          gh release upload $tag $pack --repo '${{ github.repository }}' --clobber
+          gh release delete-asset $tag "usage-gen9-${{ matrix.month }}.json.gz" --repo '${{ github.repository }}' --yes 2>$null
+          exit 0
+  index:
+    needs: repack
+    if: always()
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Collect published months
+        id: months
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $list = gh release list --repo '${{ github.repository }}' --limit 500 --json tagName | ConvertFrom-Json
+          $months = @($list | ForEach-Object { $_.tagName } |
+            Where-Object { $_ -like 'usage-data-*' } |
+            ForEach-Object { $_.Substring(11) } |
+            Sort-Object -Unique -Descending)
+          "list=$($months -join ',')" >> $env:GITHUB_OUTPUT
+      - name: Build full index
+        shell: pwsh
+        run: node tools/gen-usage-index.mjs --repo '${{ github.repository }}' --months '${{ steps.months.outputs.list }}' --out dist/usage-index.json
+      - name: Upload index to the latest release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = gh release view --repo '${{ github.repository }}' --json tagName -q .tagName
+          gh release upload $tag dist/usage-index.json --repo '${{ github.repository }}' --clobber

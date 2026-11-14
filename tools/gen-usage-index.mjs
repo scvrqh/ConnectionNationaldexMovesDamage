@@ -45,7 +45,7 @@ const index = {
     .reverse()
     .map((month) => ({
       month,
-      url: `https://github.com/${REPO}/releases/download/usage-data-${month}/usage-gen9-${month}.json.gz`,
+      url: `https://github.com/${REPO}/releases/download/usage-data-${month}/usage-gen9-${month}.pack`,
     })),
 };
 

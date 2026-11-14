@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
-import zlib from "node:zlib";
+
+import { encodeUsagePack } from "./lib/usage-pack.mjs";
 
 // 把 .dsh-diag/usage-raw 里的 chaos 原始数据裁成随包小表。
 // 只保留页面用得到的部分：使用率、常见配点、招式/道具/特性/太晶占比。
@@ -9,7 +10,7 @@ const MONTH = process.env.USAGE_MONTH || "2026-10";
 // 与 gen-usage-raw.mjs 的落盘目录一致：按月分目录
 const RAW = path.join(".dsh-diag/usage-raw", MONTH);
 const DETAIL_MIN = Number(process.env.DETAIL_MIN || 20); // 万分比，0.2%
-const OUT = process.env.USAGE_OUT || "core-model/src/main/resources/pokedata/usage-gen9.json.gz";
+const OUT = process.env.USAGE_OUT || "dist/usage-gen9.pack";
 // 体积就是 APK 体积：配点/招式/道具/特性/太晶都按页面能看的条数留
 const TOP = {
   sp: Number(process.env.TOP_SP || 4),
@@ -126,11 +127,11 @@ for (const [fmt, elos] of Object.entries(perElo)) {
   monCount += mons.length;
   formats[fmt] = { elos: order, battles: order.map((e) => elos[e].battles), mons };
 }
+// 直接写成 PKMB 二进制包：中间 JSON 不落盘
 const out = { month: MONTH, source: "https://www.smogon.com/stats/", dict, formats };
-const text = JSON.stringify(out);
-const gz = zlib.gzipSync(Buffer.from(text, "utf8"), { level: 9 });
+const { bytes, stats } = encodeUsagePack(out);
 fs.mkdirSync(path.dirname(OUT), { recursive: true });
-fs.writeFileSync(OUT, gz);
+fs.writeFileSync(OUT, Buffer.from(bytes));
 console.log("格式", Object.keys(formats).length, "档位", Object.values(formats).reduce((a, f) => a + f.elos.length, 0),
   "宝可梦条目", monCount, "字典", dict.length,
-  "原始", (text.length / 1048576).toFixed(2) + "MB", "gzip", (gz.length / 1024).toFixed(0) + "KB");
+  "原始", (stats.jsonBytes / 1048576).toFixed(2) + "MB", "pack", (bytes.length / 1024).toFixed(0) + "KB");

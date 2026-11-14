@@ -7,10 +7,10 @@ import { fileURLToPath } from "node:url";
 //
 //   manifest.json
 //   champion-pack.json
-//   usage/<YYYY-MM>.json.gz
+//   usage/<YYYY-MM>.pack
 //
 // 输入取自本仓库 dist/ 下由既有 workflow 产出的两份文件：
-//   dist/usage-index.json   {"months":[{"month":"2026-11","url":"https://.../usage-gen9-2026-11.json.gz"}]}
+//   dist/usage-index.json   {"months":[{"month":"2026-11","url":"https://.../usage-gen9-2026-11.pack"}]}
 //   dist/champion-pack.json {"version":20261103,...}
 //
 //   node tools/build-bundle.mjs                        # 全部月份，联网下载
@@ -99,14 +99,14 @@ async function main() {
 
   const picked = limit > 0 ? months.slice(0, limit) : months;
 
-  // 2. 逐月下载（或读缓存）到 usage/<月>.json.gz
+  // 2. 逐月下载（或读缓存）到 usage/<月>.pack
   const usageDir = path.join(OUT, "usage");
   fs.mkdirSync(usageDir, { recursive: true });
 
   const usage = [];
   const failed = [];
   for (const { month, url } of picked) {
-    const file = path.join(usageDir, month + ".json.gz");
+    const file = path.join(usageDir, month + ".pack");
     if (OFFLINE) {
       if (!fs.existsSync(file) || fs.statSync(file).size === 0) {
         failed.push({ month, reason: "无缓存" });
@@ -120,7 +120,7 @@ async function main() {
         continue;
       }
     }
-    usage.push({ month, file: "usage/" + month + ".json.gz", bytes: fs.statSync(file).size });
+    usage.push({ month, file: "usage/" + month + ".pack", bytes: fs.statSync(file).size });
   }
 
   // 一个月份都没有：离线试跑照样收尾（manifest 的 usage 为空数组，方便核对结构）；

@@ -1,7 +1,7 @@
 name: Data bundle
 
 # 汇总包：一次导入即可拿到冠军数据 + 全部使用率月份，pack 结构由 app 侧固定契约决定：
-#   manifest.json + champion-pack.json + usage/<YYYY-MM>.json.gz
+#   manifest.json + champion-pack.json + usage/<YYYY-MM>.pack
 # 输入是既有两类发布的产物（champion-data-* 的 champion-pack.json、usage-data-* 的 usage-index.json），
 # 都从 Release 取回后再打包 —— 本作业不重新生成任何数据。
 #

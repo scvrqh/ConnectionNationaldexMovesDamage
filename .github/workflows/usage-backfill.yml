@@ -102,7 +102,7 @@ jobs:
         shell: pwsh
         env:
           USAGE_MONTH: ${{ matrix.month }}
-          USAGE_OUT: dist/usage-gen9-${{ matrix.month }}.json.gz
+          USAGE_OUT: dist/usage-gen9-${{ matrix.month }}.pack
         run: node tools/gen-usage-stats.mjs
 
       - name: Build index for this month
@@ -134,7 +134,7 @@ jobs:
           tag_name: usage-data-${{ matrix.month }}
           name: usage-data-${{ matrix.month }}
           files: |
-            dist/usage-gen9-${{ matrix.month }}.json.gz
+            dist/usage-gen9-${{ matrix.month }}.pack
             dist/usage-index.json
             dist/champion-pack.json
           fail_on_unmatched_files: false

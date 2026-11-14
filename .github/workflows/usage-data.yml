@@ -3,7 +3,7 @@ name: Usage data pack
 # 自包含：生成脚本的副本放在本仓库 tools/ 里（gen-usage-raw.mjs / gen-usage-stats.mjs / gen-usage-index.mjs），
 # 不读代码仓库。作业每月从 smogon 抓 chaos 原始数据（47 个格式 × 各档位，约 470 MB），
 # 裁成 2 MB 左右的数据包，发布成 tag 为 usage-data-<月> 的 Release：
-#   asset = usage-gen9-<月>.json.gz + usage-index.json
+#   asset = usage-gen9-<月>.pack + usage-index.json
 #
 # app 端固定地址：
 #   https://github.com/scvrqh/ConnectionNationaldexMovesDamage/releases/latest/download/usage-index.json
@@ -90,7 +90,7 @@ jobs:
         shell: pwsh
         env:
           USAGE_MONTH: ${{ steps.m.outputs.month }}
-          USAGE_OUT: dist/usage-gen9-${{ steps.m.outputs.month }}.json.gz
+          USAGE_OUT: dist/usage-gen9-${{ steps.m.outputs.month }}.pack
         run: node tools/gen-usage-stats.mjs
 
       - name: Collect already published months
@@ -137,7 +137,7 @@ jobs:
           tag_name: ${{ steps.m.outputs.tag }}
           name: ${{ steps.m.outputs.tag }}
           files: |
-            dist/usage-gen9-${{ steps.m.outputs.month }}.json.gz
+            dist/usage-gen9-${{ steps.m.outputs.month }}.pack
             dist/usage-index.json
             dist/champion-pack.json
           fail_on_unmatched_files: false
@@ -145,7 +145,7 @@ jobs:
             ${{ steps.m.outputs.month }} 的使用率数据包（smogon chaos 裁剪，约 2 MB）。
 
             索引（永远指向最新一次发布）：https://github.com/${{ github.repository }}/releases/latest/download/usage-index.json
-            当月数据：https://github.com/${{ github.repository }}/releases/download/${{ steps.m.outputs.tag }}/usage-gen9-${{ steps.m.outputs.month }}.json.gz
+            当月数据：https://github.com/${{ github.repository }}/releases/download/${{ steps.m.outputs.tag }}/usage-gen9-${{ steps.m.outputs.month }}.pack
 
       - name: Verify releases/latest carries both packs
         if: steps.check.outputs.skip == 'false'
