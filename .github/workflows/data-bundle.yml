@@ -46,20 +46,23 @@ jobs:
           set -euo pipefail
           repo="${{ github.repository }}"
           mkdir -p dist
-          champion_tag=$(gh release list --repo "$repo" --limit 200 --json tagName,createdAt \
-            --jq '[.[] | select(.tagName | startswith("champion-data-"))] | sort_by(.createdAt) | reverse | .[0].tagName')
+          champion_tag=$(gh release list --repo "$repo" --limit 200 --json tagName \
+            --jq '[.[] | select(.tagName | startswith("champion-data-"))] | map(.tagName) | sort | last')
           if [ -z "$champion_tag" ] || [ "$champion_tag" = "null" ]; then
             echo "::error::还没有 champion-data-* 发布，无法组装汇总包"; exit 1
           fi
-          usage_tag=$(gh release list --repo "$repo" --limit 200 --json tagName,createdAt \
-            --jq '[.[] | select(.tagName | startswith("usage-data-"))] | sort_by(.createdAt) | reverse | .[0].tagName')
+          usage_tag=$(gh release list --repo "$repo" --limit 200 --json tagName \
+            --jq '[.[] | select(.tagName | startswith("usage-data-"))] | map(.tagName) | sort | last')
           if [ -z "$usage_tag" ] || [ "$usage_tag" = "null" ]; then
             echo "::error::还没有 usage-data-* 发布，无法组装汇总包"; exit 1
           fi
           echo "冠军数据：$champion_tag"
           echo "使用率索引：$usage_tag"
           gh release download "$champion_tag" --repo "$repo" --pattern champion-pack.json --dir dist --clobber
-          gh release download "$usage_tag" --repo "$repo" --pattern usage-index.json --dir dist --clobber
+          # The full index (every month) ships with the newest champion-data release; a per-month
+          # usage-data release carries only its own month, so it is just a fallback.
+          gh release download "$champion_tag" --repo "$repo" --pattern usage-index.json --dir dist --clobber \
+            || gh release download "$usage_tag" --repo "$repo" --pattern usage-index.json --dir dist --clobber
           ls -l dist
 
       - name: Build both variants
