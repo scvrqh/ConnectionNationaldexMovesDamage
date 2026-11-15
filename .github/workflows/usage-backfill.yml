@@ -16,6 +16,10 @@ on:
         description: '结束月份 YYYY-MM（含）'
         required: true
         default: '2026-09'
+      force:
+        description: '为 true 时连已发布的月份也重新生成并覆盖资产'
+        required: false
+        default: 'false'
 
 permissions:
   contents: write
@@ -66,6 +70,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          if ('${{ inputs.force }}' -eq 'true') { "skip=false" >> $env:GITHUB_OUTPUT; exit 0 }
           gh release view 'usage-data-${{ matrix.month }}' --repo '${{ github.repository }}' 2>$null
           if ($LASTEXITCODE -eq 0) { "skip=true" >> $env:GITHUB_OUTPUT }
           else { "skip=false" >> $env:GITHUB_OUTPUT }
