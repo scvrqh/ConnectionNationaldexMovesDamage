@@ -1,0 +1,136 @@
+name: Usage data lite backfill
+
+# 给已经发布过的月份补一份「精简版」资产（usage-gen9-<月>-lite.pack）。
+# 完整版由 usage-data / usage-backfill 生成；这个 workflow 只补精简版并重建索引。
+# 已经有 lite 资产的月份可以直接重跑（--clobber 覆盖）。
+on:
+  workflow_dispatch:
+    inputs:
+      from:
+        description: '起始月份 YYYY-MM'
+        required: true
+        default: '2023-01'
+      to:
+        description: '结束月份 YYYY-MM（含）'
+        required: true
+        default: '2026-10'
+
+permissions:
+  contents: write
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      months: ${{ steps.list.outputs.months }}
+    steps:
+      - name: List months
+        id: list
+        shell: pwsh
+        run: |
+          $from = [datetime]::ParseExact('${{ inputs.from }}', 'yyyy-MM', $null)
+          $to = [datetime]::ParseExact('${{ inputs.to }}', 'yyyy-MM', $null)
+          if ($to -lt $from) { throw '结束月份早于起始月份' }
+          $list = @()
+          for ($d = $from; $d -le $to; $d = $d.AddMonths(1)) { $list += $d.ToString('yyyy-MM') }
+          Write-Host "共 $($list.Count) 个月：$($list[0]) .. $($list[-1])"
+          $json = '["' + ($list -join '","') + '"]'
+          "months=$json" >> $env:GITHUB_OUTPUT
+
+  lite:
+    needs: plan
+    name: lite ${{ matrix.month }}
+    runs-on: windows-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        month: ${{ fromJSON(needs.plan.outputs.months) }}
+    steps:
+      - name: Checkout this repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Skip when this month was never published
+        id: check
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view 'usage-data-${{ matrix.month }}' --repo '${{ github.repository }}' 2>$null
+          if ($LASTEXITCODE -eq 0) { 'skip=false' >> $env:GITHUB_OUTPUT }
+          else {
+            Write-Host "::warning::${{ matrix.month }} 还没有发布，跳过"
+            'skip=true' >> $env:GITHUB_OUTPUT
+          }
+          exit 0
+
+      - name: Download chaos data from smogon
+        if: steps.check.outputs.skip == 'false'
+        shell: pwsh
+        env:
+          USAGE_MONTH: ${{ matrix.month }}
+        run: node tools/gen-usage-raw.mjs
+
+      - name: Build lite pack
+        if: steps.check.outputs.skip == 'false'
+        shell: pwsh
+        env:
+          USAGE_MONTH: ${{ matrix.month }}
+          USAGE_LITE: '1'
+          USAGE_OUT: dist/usage-gen9-${{ matrix.month }}-lite.pack
+        run: node tools/gen-usage-stats.mjs
+
+      - name: Upload lite asset
+        if: steps.check.outputs.skip == 'false'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload 'usage-data-${{ matrix.month }}' 'dist/usage-gen9-${{ matrix.month }}-lite.pack' --repo '${{ github.repository }}' --clobber
+          Write-Host "已上传 usage-gen9-${{ matrix.month }}-lite.pack"
+
+  index:
+    needs: lite
+    if: always()
+    runs-on: windows-latest
+    steps:
+      - name: Checkout this repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Collect already published months
+        id: months
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $list = gh release list --repo '${{ github.repository }}' --limit 500 --json tagName | ConvertFrom-Json
+          $months = @($list | ForEach-Object { $_.tagName } |
+            Where-Object { $_ -like 'usage-data-*' } |
+            ForEach-Object { $_.Substring(11) } |
+            Sort-Object -Unique -Descending)
+          Write-Host "已发布 $($months.Count) 个月：$($months -join ', ')"
+          "list=$($months -join ',')" >> $env:GITHUB_OUTPUT
+
+      - name: Build full index
+        shell: pwsh
+        run: node tools/gen-usage-index.mjs --repo '${{ github.repository }}' --months '${{ steps.months.outputs.list }}' --out dist/usage-index.json
+
+      - name: Upload index to the latest release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = gh release view --repo '${{ github.repository }}' --json tagName -q .tagName
+          Write-Host "写到最新 release：$tag"
+          gh release upload $tag dist/usage-index.json --repo '${{ github.repository }}' --clobber

@@ -45,7 +45,9 @@ const index = {
     .reverse()
     .map((month) => ({
       month,
+      // 每个月两份资产：完整版（条目不限）与精简版（每档只留常见几条）
       url: `https://github.com/${REPO}/releases/download/usage-data-${month}/usage-gen9-${month}.pack`,
+      lite: `https://github.com/${REPO}/releases/download/usage-data-${month}/usage-gen9-${month}-lite.pack`,
     })),
 };
 

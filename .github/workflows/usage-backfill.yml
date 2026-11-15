@@ -103,7 +103,12 @@ jobs:
         env:
           USAGE_MONTH: ${{ matrix.month }}
           USAGE_OUT: dist/usage-gen9-${{ matrix.month }}.pack
-        run: node tools/gen-usage-stats.mjs
+        run: |
+          # 每月两份资产：完整版（条目不限）+ 精简版（每档只留常见几条）
+          node tools/gen-usage-stats.mjs
+          $env:USAGE_LITE = '1'
+          $env:USAGE_OUT = 'dist/usage-gen9-${{ matrix.month }}-lite.pack'
+          node tools/gen-usage-stats.mjs
 
       - name: Build index for this month
         if: steps.check.outputs.skip == 'false' && steps.source.outputs.skip == 'false'
@@ -135,6 +140,7 @@ jobs:
           name: usage-data-${{ matrix.month }}
           files: |
             dist/usage-gen9-${{ matrix.month }}.pack
+            dist/usage-gen9-${{ matrix.month }}-lite.pack
             dist/usage-index.json
             dist/champion-pack.json
           fail_on_unmatched_files: false

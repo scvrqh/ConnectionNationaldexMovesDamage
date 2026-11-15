@@ -91,7 +91,12 @@ jobs:
         env:
           USAGE_MONTH: ${{ steps.m.outputs.month }}
           USAGE_OUT: dist/usage-gen9-${{ steps.m.outputs.month }}.pack
-        run: node tools/gen-usage-stats.mjs
+        run: |
+          # 每月两份资产：完整版（条目不限）+ 精简版（每档只留常见几条）
+          node tools/gen-usage-stats.mjs
+          $env:USAGE_LITE = '1'
+          $env:USAGE_OUT = 'dist/usage-gen9-${{ steps.m.outputs.month }}-lite.pack'
+          node tools/gen-usage-stats.mjs
 
       - name: Collect already published months
         id: months
@@ -138,11 +143,12 @@ jobs:
           name: ${{ steps.m.outputs.tag }}
           files: |
             dist/usage-gen9-${{ steps.m.outputs.month }}.pack
+            dist/usage-gen9-${{ steps.m.outputs.month }}-lite.pack
             dist/usage-index.json
             dist/champion-pack.json
           fail_on_unmatched_files: false
           body: |
-            ${{ steps.m.outputs.month }} 的使用率数据包（smogon chaos 裁剪，约 2 MB）。
+            ${{ steps.m.outputs.month }} 的使用率数据包（smogon chaos 裁剪）：完整版约 10 MB，精简版约 2 MB。
 
             索引（永远指向最新一次发布）：https://github.com/${{ github.repository }}/releases/latest/download/usage-index.json
             当月数据：https://github.com/${{ github.repository }}/releases/download/${{ steps.m.outputs.tag }}/usage-gen9-${{ steps.m.outputs.month }}.pack

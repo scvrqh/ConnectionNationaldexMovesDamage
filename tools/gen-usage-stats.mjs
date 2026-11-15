@@ -11,13 +11,16 @@ const MONTH = process.env.USAGE_MONTH || "2026-10";
 const RAW = path.join(".dsh-diag/usage-raw", MONTH);
 const DETAIL_MIN = Number(process.env.DETAIL_MIN || 20); // 万分比，0.2%
 const OUT = process.env.USAGE_OUT || "dist/usage-gen9.pack";
-// 体积就是 APK 体积：配点/招式/道具/特性/太晶都按页面能看的条数留
+// 默认出「完整版」（条目不限）；USAGE_LITE=1 出精简版（每档只留最常见的几条，约 2 MB）。
+// TOP_* 环境变量仍然可以单独压某一块，设 0 表示不限。
+const LITE = process.env.USAGE_LITE === "1";
+const topOf = (name, lite) => Number(process.env[name] || (LITE ? lite : 0));
 const TOP = {
-  sp: Number(process.env.TOP_SP || 4),
-  mv: Number(process.env.TOP_MV || 8),
-  it: Number(process.env.TOP_IT || 4),
-  ab: Number(process.env.TOP_AB || 4),
-  te: Number(process.env.TOP_TE || 4),
+  sp: topOf("TOP_SP", 4),
+  mv: topOf("TOP_MV", 8),
+  it: topOf("TOP_IT", 4),
+  ab: topOf("TOP_AB", 4),
+  te: topOf("TOP_TE", 4),
 };
 
 const pct = (count, total) => Math.max(0, Math.min(10000, Math.round((count / total) * 10000)));
@@ -25,7 +28,9 @@ const topN = (dict, n, total) =>
   Object.fromEntries(
     Object.entries(dict || {})
       .sort((a, b) => b[1] - a[1])
-      .slice(0, n)
+      .slice(0, n > 0 ? n : undefined)
+      // chaos 数据里有空名字的条目：写进字典会让图表多一条无名线
+      .filter(([k]) => k.trim() !== "")
       .map(([k, v]) => [k, pct(v, total)]),
   );
 
