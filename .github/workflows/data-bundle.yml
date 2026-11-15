@@ -114,7 +114,7 @@ jobs:
           set -euo pipefail
           repo="${{ github.repository }}"
           tag="${{ steps.tag.outputs.tag }}"
-          notes=$(printf '汇总数据包：冠军数据 + 全部已发布的使用率月份，一次导入即可。\n\n全量（约 480 MB）：https://github.com/%s/releases/latest/download/data-bundle-full.zip\n精简（约 90 MB）：https://github.com/%s/releases/latest/download/data-bundle-lite.zip\n' "$repo" "$repo")
+          notes=$(printf '汇总数据包：冠军数据 + 全部已发布的使用率月份，一次导入即可。\n\n全量（约 700 MB）：https://github.com/%s/releases/latest/download/data-bundle-full.zip\n精简（约 80 MB）：https://github.com/%s/releases/latest/download/data-bundle-lite.zip\n' "$repo" "$repo")
           gh release create "$tag" --repo "$repo" --title "$tag" --notes "$notes" \
             dist/data-bundle-full.zip \
             dist/data-bundle-lite.zip \
