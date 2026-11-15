@@ -10,20 +10,26 @@ import { fileURLToPath } from "node:url";
 //   usage/<YYYY-MM>.pack
 //
 // 输入取自本仓库 dist/ 下由既有 workflow 产出的两份文件：
-//   dist/usage-index.json   {"months":[{"month":"2026-11","url":"https://.../usage-gen9-2026-11.pack"}]}
+//   dist/usage-index.json   {"months":[{"month":"2026-11","url":".../usage-gen9-2026-11.pack","lite":"...-lite.pack"}]}
 //   dist/champion-pack.json {"version":20261103,...}
 //
-//   node tools/build-bundle.mjs                        # 全部月份，联网下载
+// 索引里每个月份都有全量与精简两个地址，所以这里出两个变体（各自一份完整包，互不掺和）：
+//   dist/bundle/full  全量（每月 10~18 MB）
+//   dist/bundle/lite  精简（每月 2 MB 上下）
+//
+//   node tools/build-bundle.mjs                        # 两个变体、全部月份，联网下载
+//   node tools/build-bundle.mjs --variant lite         # 只打精简版
 //   node tools/build-bundle.mjs --limit 1              # 只取最新 1 个月
-//   node tools/build-bundle.mjs --offline --limit 1    # 只用 dist/bundle/usage 里已有的缓存
+//   node tools/build-bundle.mjs --offline --limit 1    # 只用 dist/bundle/<变体>/usage 里已有的缓存
 //
 // 参数：
-//   --out <dir>   输出目录，默认 dist/bundle
-//   --offline     不联网；缺缓存的月份跳过，manifest 里不列该月（本地试跑用）
-//   --limit <n>   只取索引里最新的 n 个月（索引本身从新到旧）
+//   --variant <full|lite|both>   变体，默认 both
+//   --out <dir>                  输出目录：单变体时就是它自己，both 时是父目录（默认 dist/bundle）
+//   --offline                    不联网；缺缓存的月份跳过，manifest 里不列该月（本地试跑用）
+//   --limit <n>                  只取索引里最新的 n 个月（索引本身从新到旧）
 //
 // 某个下载失败（404 / 网络错误）只跳过该月并打印月份与状态码：索引可能比实际发布早一步，
-// 为一个还没挂上的月份让整次打包失败没有意义；一个月份都没成功才退出码 1。
+// 为一个还没挂上的月份让整次打包失败没有意义；某个变体一个月份都没成功才退出码 1。
 
 const argv = process.argv.slice(2);
 const arg = (name) => {
@@ -35,12 +41,20 @@ const has = (name) => argv.includes("--" + name);
 // 仓库根目录：输入固定读 <仓库>/dist/ 下的两份文件，所以按脚本位置定位，
 // 不随执行时所在目录变化（在仓库任意子目录里跑都能工作）。
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const OUT = arg("out") ? path.resolve(arg("out")) : path.join(REPO_ROOT, "dist", "bundle");
 const OFFLINE = has("offline");
 const LIMIT_RAW = arg("limit");
+const VARIANT_RAW = String(arg("variant") || "both").toLowerCase();
+const OUT_ARG = arg("out");
 const INDEX = path.join(REPO_ROOT, "dist", "usage-index.json");
 const CHAMPION_SRC = path.join(REPO_ROOT, "dist", "champion-pack.json");
 const MONTH_RE = /^\d{4}-\d{2}$/;
+const VARIANTS = ["full", "lite"];
+
+if (!["full", "lite", "both"].includes(VARIANT_RAW)) {
+  console.error("--variant 只能是 full / lite / both：" + VARIANT_RAW);
+  process.exit(1);
+}
+const pickedVariants = VARIANT_RAW === "both" ? VARIANTS : [VARIANT_RAW];
 
 let limit = 0;
 if (LIMIT_RAW !== undefined) {
@@ -49,6 +63,13 @@ if (LIMIT_RAW !== undefined) {
     console.error("--limit 应为正整数：" + LIMIT_RAW);
     process.exit(1);
   }
+}
+
+const OUT_ROOT = OUT_ARG ? path.resolve(OUT_ARG) : path.join(REPO_ROOT, "dist", "bundle");
+
+// 单变体且显式给了 --out：直接用它；否则每个变体一个子目录，缓存不会互相覆盖
+function outDirOf(variant) {
+  return pickedVariants.length === 1 && OUT_ARG ? OUT_ROOT : path.join(OUT_ROOT, variant);
 }
 
 function readJson(file, what) {
@@ -61,6 +82,16 @@ function readJson(file, what) {
   }
 }
 
+// 使用率数据是 PKMB 二进制（magic "PKMB"），不是 gzip。早年这里按 1f 8b 校验，
+// 换成二进制格式后必须跟着改，否则每一份都会被当成错误页面丢掉。
+function packProblem(body) {
+  if (body.length < 4) return "只有 " + body.length + " 字节";
+  if (body[0] !== 0x50 || body[1] !== 0x4b || body[2] !== 0x4d || body[3] !== 0x42) {
+    return "不是 PKMB 数据（头部 " + body.subarray(0, 4).toString("hex") + "）";
+  }
+  return null;
+}
+
 async function download(month, url, file) {
   console.log("下载 " + month + "：" + url);
   let res;
@@ -71,45 +102,40 @@ async function download(month, url, file) {
   }
   if (!res.ok) return "HTTP " + res.status + " " + res.statusText;
   const body = Buffer.from(await res.arrayBuffer());
-  // 至少得看得出是 gzip（1f 8b），免得把错误页面当数据写进包里
-  if (body.length < 2 || body[0] !== 0x1f || body[1] !== 0x8b) {
-    return "不是 gzip 数据（" + body.length + " 字节）";
-  }
+  const problem = packProblem(body);
+  if (problem) return problem + "（" + body.length + " 字节）";
   fs.writeFileSync(file, body);
   return null;
 }
 
-async function main() {
-  // 1. 读索引，按月份从新到旧排好（索引本来有序，这里再排一次，避免上游顺序变化）
-  const index = readJson(INDEX, "使用率索引");
-  const all = Array.isArray(index.months) ? index.months : [];
-  if (!all.length) throw new Error("使用率索引里没有任何月份：" + INDEX);
+// 索引里的每个月都带全量与精简两个地址，缺哪个就跳过哪个
+function urlOf(entry, variant) {
+  return variant === "lite" ? entry.lite : entry.url;
+}
 
-  const months = all
-    .map((m) => ({ month: String(m.month || ""), url: String(m.url || "") }))
-    .filter((m) => {
-      if (!MONTH_RE.test(m.month) || !/^https?:\/\//.test(m.url)) {
-        console.warn("跳过索引里的无效条目：" + JSON.stringify(m));
-        return false;
-      }
-      return true;
-    })
-    .sort((a, b) => (a.month < b.month ? 1 : a.month > b.month ? -1 : 0));
-  if (!months.length) throw new Error("使用率索引里没有可用月份：" + INDEX);
-
-  const picked = limit > 0 ? months.slice(0, limit) : months;
-
-  // 2. 逐月下载（或读缓存）到 usage/<月>.pack
+async function buildVariant(variant, months, championBytes, version) {
+  const OUT = outDirOf(variant);
   const usageDir = path.join(OUT, "usage");
   fs.mkdirSync(usageDir, { recursive: true });
 
   const usage = [];
   const failed = [];
-  for (const { month, url } of picked) {
+  for (const entry of months) {
+    const { month } = entry;
+    const url = urlOf(entry, variant);
+    if (!url) {
+      failed.push({ month, reason: "索引里没有" + (variant === "lite" ? "精简版" : "全量版") });
+      continue;
+    }
     const file = path.join(usageDir, month + ".pack");
     if (OFFLINE) {
       if (!fs.existsSync(file) || fs.statSync(file).size === 0) {
         failed.push({ month, reason: "无缓存" });
+        continue;
+      }
+      const problem = packProblem(fs.readFileSync(file));
+      if (problem) {
+        failed.push({ month, reason: "缓存损坏：" + problem });
         continue;
       }
     } else {
@@ -123,45 +149,77 @@ async function main() {
     usage.push({ month, file: "usage/" + month + ".pack", bytes: fs.statSync(file).size });
   }
 
-  // 一个月份都没有：离线试跑照样收尾（manifest 的 usage 为空数组，方便核对结构）；
-  // 联网运行则宁可失败，也不发布一个空包
   if (!usage.length && !OFFLINE) {
     throw new Error(
-      "没有任何月份可用（" + picked.map((m) => m.month).join(" / ") + "）：" +
+      variant + " 变体没有任何月份可用（" + months.map((m) => m.month).join(" / ") + "）：" +
         failed.map((f) => f.month + "=" + f.reason).join("，")
     );
   }
   if (!usage.length) {
-    console.warn("离线模式下所有月份都缺缓存，manifest 的 usage 会是空数组");
+    console.warn("离线模式下 " + variant + " 变体所有月份都缺缓存，manifest 的 usage 会是空数组");
   }
 
-  // 3. 冠军数据原样拷进包里，版本号从它自己的内容取（取不到写 0）
-  const champion = readJson(CHAMPION_SRC, "冠军数据包");
   const championDst = path.join(OUT, "champion-pack.json");
   fs.copyFileSync(CHAMPION_SRC, championDst);
-  const championBytes = fs.statSync(championDst).size;
-  const version = Number(champion.version) || 0;
 
-  // 4. manifest：App 只认这些字段；可以加字段，不能改已有字段名或语义
+  // manifest：App 只认 schema/champion/usage 这些字段；新增字段可以读也可以忽略
   const manifest = {
     schema: 1,
+    variant,
     generated: new Date().toISOString().replace(/\.\d{3}Z$/, "Z"),
     champion: { file: "champion-pack.json", version, bytes: championBytes },
     usage,
   };
-  const manifestText = JSON.stringify(manifest, null, 2) + "\n";
-  fs.writeFileSync(path.join(OUT, "manifest.json"), manifestText);
+  fs.writeFileSync(path.join(OUT, "manifest.json"), JSON.stringify(manifest, null, 2) + "\n");
 
   const usageBytes = usage.reduce((n, u) => n + u.bytes, 0);
-  console.log("汇总包月份：" + usage.length +
-    (usage.length ? "（" + usage.map((u) => u.month).join(" / ") + "）" : ""));
-  console.log("总字节：" + (usageBytes + championBytes + Buffer.byteLength(manifestText)) +
+  console.log("[" + variant + "] 月份：" + usage.length);
+  console.log("[" + variant + "] 总字节：" + (usageBytes + championBytes) +
     "（冠军 " + championBytes + "，使用率 " + usageBytes + "）");
-  console.log("输出路径：" + OUT);
+  console.log("[" + variant + "] 输出路径：" + OUT);
   if (failed.length) {
-    console.warn("已跳过 " + failed.length + " 个月：" +
+    console.warn("[" + variant + "] 已跳过 " + failed.length + " 个月：" +
       failed.map((f) => f.month + "（" + f.reason + "）").join(" / ") + "，manifest 里没有这些月份");
   }
+  return { usage: usage.length, failed: failed.length };
+}
+
+async function main() {
+  // 1. 读索引，按月份从新到旧排好（索引本来有序，这里再排一次，避免上游顺序变化）
+  const index = readJson(INDEX, "使用率索引");
+  const all = Array.isArray(index.months) ? index.months : [];
+  if (!all.length) throw new Error("使用率索引里没有任何月份：" + INDEX);
+
+  const months = all
+    .map((m) => ({
+      month: String(m.month || ""),
+      url: String(m.url || ""),
+      lite: String(m.lite || ""),
+    }))
+    .filter((m) => {
+      if (!MONTH_RE.test(m.month) || !/^https?:\/\//.test(m.url)) {
+        console.warn("跳过索引里的无效条目：" + JSON.stringify(m));
+        return false;
+      }
+      return true;
+    })
+    .sort((a, b) => (a.month < b.month ? 1 : a.month > b.month ? -1 : 0));
+  if (!months.length) throw new Error("使用率索引里没有可用月份：" + INDEX);
+
+  const picked = limit > 0 ? months.slice(0, limit) : months;
+
+  // 2. 冠军数据只需要读一次，两个变体各拷一份
+  const champion = readJson(CHAMPION_SRC, "冠军数据包");
+  const championBytes = fs.statSync(CHAMPION_SRC).size;
+  const version = Number(champion.version) || 0;
+
+  // 3. 逐变体打包
+  let anyFailed = false;
+  for (const variant of pickedVariants) {
+    const r = await buildVariant(variant, picked, championBytes, version);
+    if (r.failed) anyFailed = true;
+  }
+  if (anyFailed) console.warn("有月份被跳过，见上面的清单");
 }
 
 main().catch((e) => {

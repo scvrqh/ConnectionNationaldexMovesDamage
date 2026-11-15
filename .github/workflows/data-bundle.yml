@@ -5,6 +5,10 @@ name: Data bundle
 # 输入是既有两类发布的产物（champion-data-* 的 champion-pack.json、usage-data-* 的 usage-index.json），
 # 都从 Release 取回后再打包 —— 本作业不重新生成任何数据。
 #
+# 索引里每个月都有全量与精简两个地址，所以出两份包（各自完整、互不掺和）：
+#   data-bundle-full.zip  每月 10~18 MB，46 个月约 480 MB
+#   data-bundle-lite.zip  每月 2 MB 上下，46 个月约 90 MB
+#
 # 发布时必须同时挂上 champion-pack.json 与 usage-index.json：releases/latest 只指向最近创建的
 # 那个 release，app 里写死的两个老地址不能因为这次发布而 404。
 
@@ -24,7 +28,8 @@ permissions:
 jobs:
   bundle:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # 46 个月 ×（全量 10~18 MB + 精简 2 MB）下载再压两份：半小时不够，给一小时
+    timeout-minutes: 60
     steps:
       - name: Checkout this repository
         uses: actions/checkout@v4
@@ -57,23 +62,25 @@ jobs:
           gh release download "$usage_tag" --repo "$repo" --pattern usage-index.json --dir dist --clobber
           ls -l dist
 
-      - name: Build the bundle
+      - name: Build both variants
         env:
           LIMIT: ${{ inputs.limit }}
         run: |
           set -euo pipefail
           if [ -n "${LIMIT:-}" ]; then
-            node tools/build-bundle.mjs --limit "$LIMIT"
+            node tools/build-bundle.mjs --variant both --limit "$LIMIT"
           else
-            node tools/build-bundle.mjs
+            node tools/build-bundle.mjs --variant both
           fi
 
-      - name: Zip the bundle
+      - name: Zip both variants
         run: |
           set -euo pipefail
           # 显式列出条目：manifest.json 必须在 zip 根目录，别让 zip 写成 ./manifest.json
-          ( cd dist/bundle && zip -r ../data-bundle.zip manifest.json champion-pack.json usage )
-          unzip -l dist/data-bundle.zip | head -n 12
+          ( cd dist/bundle/full && zip -r ../../data-bundle-full.zip manifest.json champion-pack.json usage )
+          ( cd dist/bundle/lite && zip -r ../../data-bundle-lite.zip manifest.json champion-pack.json usage )
+          ls -l dist/data-bundle-*.zip
+          unzip -l dist/data-bundle-lite.zip | head -n 12
 
       - name: Snapshot formats-data.js
         run: |
@@ -97,29 +104,36 @@ jobs:
           done
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
-      - name: Publish release with four assets
+      - name: Publish release with five assets
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           repo="${{ github.repository }}"
           tag="${{ steps.tag.outputs.tag }}"
-          gh release create "$tag" --repo "$repo" --title "$tag" \
-            --notes "$(printf '汇总数据包：冠军数据 + 全部已发布的使用率月份，一次导入即可。\n\n直链：https://github.com/%s/releases/latest/download/data-bundle.zip\n' "$repo")" \
-            dist/data-bundle.zip \
+          notes=$(printf '汇总数据包：冠军数据 + 全部已发布的使用率月份，一次导入即可。\n\n全量（约 480 MB）：https://github.com/%s/releases/latest/download/data-bundle-full.zip\n精简（约 90 MB）：https://github.com/%s/releases/latest/download/data-bundle-lite.zip\n' "$repo" "$repo")
+          gh release create "$tag" --repo "$repo" --title "$tag" --notes "$notes" \
+            dist/data-bundle-full.zip \
+            dist/data-bundle-lite.zip \
             dist/tiers-formats-data.js \
             dist/champion-pack.json \
             dist/usage-index.json
 
-      - name: Verify releases/latest carries all four assets
+      - name: Verify releases/latest carries all five assets
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           repo="${{ github.repository }}"
           tag=$(gh release view --repo "$repo" --json tagName --jq .tagName)
-          names=$(gh release view "$tag" --repo "$repo" --json assets --jq '.assets[].name')
-          for f in data-bundle.zip tiers-formats-data.js champion-pack.json usage-index.json; do
+          json=$(gh release view "$tag" --repo "$repo" --json assets)
+          names=$(echo "$json" | jq -r '.assets[].name')
+          for f in data-bundle-full.zip data-bundle-lite.zip tiers-formats-data.js champion-pack.json usage-index.json; do
             echo "$names" | grep -qx "$f" || { echo "::error::最新 release $tag 缺少 $f"; exit 1; }
           done
-          echo "latest ($tag) 同时带 data-bundle.zip / tiers-formats-data.js / champion-pack.json / usage-index.json"
+          lite=$(echo "$json" | jq -r '.assets[] | select(.name=="data-bundle-lite.zip") | .size')
+          full=$(echo "$json" | jq -r '.assets[] | select(.name=="data-bundle-full.zip") | .size')
+          # 月份拉全了才会是这个量级；只有几十兆说明大半月份被跳过
+          [ "$lite" -ge 50000000 ] || { echo "::error::精简包只有 $lite 字节，月份可能没拉全"; exit 1; }
+          [ "$full" -gt "$lite" ] || { echo "::error::全量包不大于精简包：full=$full lite=$lite"; exit 1; }
+          echo "latest ($tag) full=$full lite=$lite"
