@@ -59,10 +59,34 @@ jobs:
           echo "冠军数据：$champion_tag"
           echo "使用率索引：$usage_tag"
           gh release download "$champion_tag" --repo "$repo" --pattern champion-pack.json --dir dist --clobber
-          # The full index (every month) ships with the newest champion-data release; a per-month
-          # usage-data release carries only its own month, so it is just a fallback.
-          gh release download "$champion_tag" --repo "$repo" --pattern usage-index.json --dir dist --clobber \
-            || gh release download "$usage_tag" --repo "$repo" --pattern usage-index.json --dir dist --clobber
+          # usage-index.json 必须含全部月份。data-bundle-* 与 champion-data-* 带的是整份索引，
+          # 单月 usage-data-* 只有一条 —— 曾经因为拿到单月索引，打出来的包只剩一个月。
+          # 这里逐个候选数月份，取最多的那份，单月索引只当兜底。
+          best_file=""
+          best_count=0
+          best_tag=""
+          for cand in $(gh release list --repo "$repo" --limit 200 --json tagName,createdAt --jq '
+              ([.[] | select(.tagName | startswith("data-bundle-"))] | sort_by(.createdAt) | reverse | .[0:5] | .[].tagName),
+              ([.[] | select(.tagName | startswith("champion-data-"))] | sort_by(.createdAt) | reverse | .[0:2] | .[].tagName),
+              ([.[] | select(.tagName | startswith("usage-data-"))] | sort_by(.createdAt) | reverse | .[0:1] | .[].tagName)'); do
+            dir="$RUNNER_TEMP/idx/$cand"
+            mkdir -p "$dir"
+            gh release download "$cand" --repo "$repo" --pattern usage-index.json --dir "$dir" --clobber 2>/dev/null || continue
+            [ -f "$dir/usage-index.json" ] || continue
+            count=$(jq -r '.months | length' "$dir/usage-index.json" 2>/dev/null || echo 0)
+            echo "$cand：$count 个月"
+            if [ "$count" -gt "$best_count" ]; then
+              best_count="$count"; best_tag="$cand"; best_file="$dir/usage-index.json"
+            fi
+          done
+          if [ -z "$best_file" ]; then
+            echo "::error::没有任何 release 带 usage-index.json，无法组装汇总包"; exit 1
+          fi
+          if [ "$best_count" -lt 2 ]; then
+            echo "::error::找到的索引只有 $best_count 个月（$best_tag），拒绝打残缺的包"; exit 1
+          fi
+          cp "$best_file" dist/usage-index.json
+          echo "使用率索引：$best_tag（$best_count 个月）"
           ls -l dist
 
       - name: Build both variants
@@ -84,6 +108,19 @@ jobs:
           ( cd dist/bundle/lite && zip -r ../../data-bundle-lite.zip manifest.json champion-pack.json usage )
           ls -l dist/data-bundle-*.zip
           unzip -l dist/data-bundle-lite.zip | head -n 12
+
+      - name: Assert both bundles carry every month
+        run: |
+          set -euo pipefail
+          want=$(jq -r '.months | length' dist/usage-index.json)
+          echo "索引月份数：$want"
+          for v in full lite; do
+            got=$(unzip -p "dist/data-bundle-$v.zip" manifest.json | jq -r '.usage | length')
+            echo "$v：$got 个月"
+            if [ "$got" -ne "$want" ]; then
+              echo "::error::$v 包只有 $got / $want 个月，拒绝发布残缺包"; exit 1
+            fi
+          done
 
       - name: Snapshot formats-data.js
         run: |

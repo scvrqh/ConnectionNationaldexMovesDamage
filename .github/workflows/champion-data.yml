@@ -87,13 +87,29 @@ jobs:
           # releases/latest 只指向最近创建的那个 release：两类数据各有自己的 release，
           # 所以每次发布都把另一类的最新文件一并挂上，latest/download/ 下两份就一直在。
           $repo = '${{ github.repository }}'
+          # 附带的那份索引必须含全部月份：data-bundle-* 与 champion-data-* 带整份索引，
+          # 单月 usage-data-* 只有一条。逐个候选数月份，取最多的那份。
           $list = gh release list --repo $repo --limit 200 --json tagName,createdAt | ConvertFrom-Json
-          $src = @($list | Where-Object { $_.tagName -like 'usage-data-*' } | Sort-Object createdAt -Descending)[0]
-          if ($null -eq $src) {
-            Write-Host '::warning::还没有 usage-data-* 发布，本次不附带使用率索引'
+          $cands = @()
+          $cands += @($list | Where-Object { $_.tagName -like 'data-bundle-*' } | Sort-Object createdAt -Descending | Select-Object -First 5)
+          $cands += @($list | Where-Object { $_.tagName -like 'champion-data-*' } | Sort-Object createdAt -Descending | Select-Object -First 2)
+          $cands += @($list | Where-Object { $_.tagName -like 'usage-data-*' } | Sort-Object createdAt -Descending | Select-Object -First 1)
+          $bestTag = $null; $bestFile = $null; $bestCount = 0
+          foreach ($c in $cands) {
+            $dir = Join-Path $env:RUNNER_TEMP ('idx-' + $c.tagName)
+            New-Item -ItemType Directory -Force -Path $dir | Out-Null
+            gh release download $c.tagName --repo $repo --pattern usage-index.json --dir $dir --clobber 2>$null
+            $p = Join-Path $dir 'usage-index.json'
+            if (-not (Test-Path $p)) { continue }
+            $n = @((Get-Content -Raw $p | ConvertFrom-Json).months).Count
+            Write-Host "$($c.tagName)：$n 个月"
+            if ($n -gt $bestCount) { $bestCount = $n; $bestTag = $c.tagName; $bestFile = $p }
+          }
+          if ($null -eq $bestFile) {
+            Write-Host '::warning::没有任何 release 带 usage-index.json，本次不附带使用率索引'
           } else {
-            Write-Host "附上 使用率索引：$($src.tagName)"
-            gh release download $src.tagName --repo $repo --pattern usage-index.json --dir dist --clobber
+            Copy-Item $bestFile (Join-Path 'dist' 'usage-index.json') -Force
+            Write-Host "附上 使用率索引：$bestTag（$bestCount 个月）"
           }
       - name: Publish release asset
         if: steps.check.outputs.skip == 'false'
