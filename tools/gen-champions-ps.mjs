@@ -355,8 +355,8 @@ function main() {
     ['items=166', items.length === 166],
     ['abilities=215', abilities.length === 215],
     ['types=19', Object.keys(types).length === 19],
-    ['招式仅内置 11 条', mv.onlyLocal.length === 11],
-    ['招式仅生成 4 条', mv.onlyPs.length === 4],
+    ['招式仅内置 0 条', mv.onlyLocal.length === 0],
+    ['招式仅生成 0 条', mv.onlyPs.length === 0],
   ];
   for (const [name, ok] of checks) console.log('  ' + (ok ? 'PASS' : 'FAIL') + ' ' + name);
   console.log('  species 仅内置 ' + sp.onlyLocal.length + ' 条 / 仅生成 ' + sp.onlyPs.length + ' 条');
