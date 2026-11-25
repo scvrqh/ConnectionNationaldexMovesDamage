@@ -121,6 +121,28 @@ function buildSpecies() {
   const pokedex = loadTs(path.join(PS, 'pokedex.ts')).Pokedex;
   const formatsData = loadTs(path.join(MOD, 'formats-data.ts')).FormatsData;
 
+  // 合成条目在 pokedex 里没有自己的条目，按 id 建索引好让分级顺着它们的 baseSpecies 找
+  const syntheticById = {};
+  for (const [name, entry] of Object.entries(SYNTHETIC)) {
+    syntheticById[name.toLowerCase().replace(/[^a-z0-9]/g, '')] = entry;
+  }
+
+  /**
+   * 冠军赛制自己的分级（App 的冠军模式按这一份分组；Gen 9 的分级表里这些形态多半是 Illegal）。
+   * PS 的 formats-data 里有些形态是空条目（aegislashblade、squawkabillyblue…），分级写在 baseSpecies 上，
+   * 所以这里顺着 baseSpecies 往上找。
+   */
+  function championTierOf(id, depth = 0) {
+    const t = formatsData[id]?.tier;
+    if (t) return t;
+    if (depth > 3) return null;
+    const entry = pokedex[id] ?? syntheticById[id];
+    if (!entry) return null;
+    const baseId = (entry.baseSpecies || entry.name).toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (baseId === id) return null;
+    return championTierOf(baseId, depth + 1);
+  }
+
   const ids = Object.keys(formatsData)
     .filter((id) => formatsData[id].isNonstandard == null && id !== 'aegislash')
     .concat(WHITELIST);
@@ -163,11 +185,18 @@ function buildSpecies() {
     const formes = (p.otherFormes || []).filter((f) => disponibles.has(f));
     if (formes.length) e.otherFormes = formes;
     if (p.baseSpecies) e.baseSpecies = p.baseSpecies;
+    const tier = championTierOf(id);
+    if (tier) e.tier = tier;
     species[p.name] = e;
   }
 
   // Aegislash 家族：PS 没有 Both/Shield 两条，Blade 的 otherFormes 也需补齐
   for (const [name, entry] of Object.entries(SYNTHETIC)) species[name] = entry;
+  // 合成条目也走同一套分级，否则重跑生成时它们会丢掉 tier
+  for (const name of Object.keys(SYNTHETIC)) {
+    const tier = championTierOf(name.toLowerCase().replace(/[^a-z0-9]/g, ''));
+    if (tier) species[name].tier = tier;
+  }
   species['Aegislash-Blade'].otherFormes = ['Aegislash-Shield', 'Aegislash-Both'];
   abilityNames.add('Stance Change');
 
